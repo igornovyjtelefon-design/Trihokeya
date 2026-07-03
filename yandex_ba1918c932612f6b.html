@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <title>Три Кота: Онлайн Аэрохоккей</title>
+    <script src="https://cdn.jsdelivr.net/npm/socket.io-client@4.7.5/dist/socket.io.min.js"></script>
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+            -webkit-touch-callout: none;
+            -webkit-user-select: none;
+            user-select: none;
+        }
+        
+        body, html {
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background-color: #ffb834; /* Оранжевый стиль Трех Котов */
+            font-family: 'Arial Rounded MT Bold', 'Comic Sans MS', sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+
+        #game-container {
+            position: relative;
+            width: 100vw;
+            height: 100vh;
+            background-color: #fffde7;
+        }
+
+        /* Меню подключения */
+        #lobby {
+            position: absolute;
+            width: 100%;
+            height: 100%;
+            background: #ffb834;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            z-index: 100;
+            gap: 15px;
+        }
+
+        .input-field {
+            padding: 14px;
+            font-size: 18px;
+            border-radius: 12px;
+            border: 3px solid #f39c12;
+            text-align: center;
+            width: 80%;
+            max-width: 300px;
+            outline: none;
+            font-weight: bold;
+        }
+
+        .btn {
+            padding: 14px 32px;
+            font-size: 18px;
+            font-weight: bold;
+            background: #e67e22;
+            color: white;
+            border: none;
+            border-radius: 30px;
+            cursor: pointer;
+            box-shadow: 0 6px 0 #d35400;
+            transition: all 0.1s ease;
+        }
+
+        .btn:active {
+            transform: translateY(4px);
+            box-shadow: 0 2px 0 #d35400;
+        }
+
+        #status-text {
+            font-size: 16px;
+            color: #fff;
+            font-weight: bold;
+            text-align: center;
+            max-width: 80%;
+            text-shadow: 1px 1px 2px rgba(0,0,0,0.2);
+        }
+
+        /* Табло счета */
+        #scoreboard {
+            position: absolute;
+            top: env(safe-area-inset-top, 20px);
+            width: 100%;
+            display: flex;
+            justify-content: space-around;
+            font-size: 26px;
+            font-weight: 900;
+            z-index: 10;
+            pointer-events: none;
+            text-shadow: 2px 2px 0px #fff, -2px -2px 0px #fff;
+        }
+
+        .blue-team { color: #2980b9; }
+        .red-team { color: #c0392b; }
+
+        canvas {
+            width: 100%;
+            height: 100%;
+            display: block;
+            touch-action: none;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="lobby">
+        <h1 style="color: white; margin-bottom: 5px; text-shadow: 2px 2px 4px rgba(0,0,0,0.2);">Три Кота: Сетевая Игра</h1>
+        <p style="color: white; font-size: 14px; margin-bottom: 10px;">Введите одинаковый номер комнаты на двух телефонах</p>
+        <input type="text" id="room-input" class="input-field" placeholder="Номер комнаты" value="555">
+        <button class="btn" onclick="connectToGame()">ИГРАТЬ ПО СЕТИ</button>
+        <div id="status-text">Ожидание подключения...</div>
+    </div>
+
+    <div id="game-container">
+        <div id="scoreboard">
+            <div class="blue-team">Коржик: <span id="s1">0</span></div>
+            <div class="red-team">Карамелька: <span id="s2">0</span></div>
+        </div>
+        <canvas id="hockeyField"></canvas>
+    </div>
+
+<script>
+// Твой точный IP-адрес из Termux
+const socket = io("http://10.56.248.250:3000"); 
+
+const canvas = document.getElementById('hockeyField');
+const ctx = canvas.getContext('2d');
+
+let roomId = "";
+let myRole = null; // 'p1' (Синий, снизу) или 'p2' (Красный, сверху)
+let scores = [0, 0];
+let isMultiplayerStarted = false;
+
+// Настоящая физика отскоков и сумасшедшего скольжения
+const puck = { 
+    x: 0, y: 0, 
+    radius: 0, 
+    speedX: 0, speedY: 0, 
+    friction: 0.994,  // Идеальный воздух
+    bounce: 0.99,     // Зеркальный оригинальный отскок от бортов
+    maxSpeed: 32      // Высокий порог для мощных щелчков
+};
+
+const p1 = { x: 0, y: 0, lastX: 0, lastY: 0, radius: 0, color: '#3498db', stroke: '#1f618d' }; 
+const p2 = { x: 0, y: 0, lastX: 0, lastY: 0, radius: 0, color: '#e74c3c', stroke: '#922b21' }; 
+let goalWidth = 0;
+
+function resize() {
+    canvas.width = window.innerWidth * window.devicePixelRatio;
+    canvas.height = window.innerHeight * window.devicePixelRatio;
+    const scale = canvas.width / 10;
+    puck.radius = scale * 0.35;
+    p1.radius = p2.radius = scale * 0.58;
+    goalWidth = canvas.width * 0.38;
+}
+window.addEventListener('resize', resize);
+
+function connectToGame() {
+    roomId = document.getElementById('room-input').value.trim();
+    if(!roomId) return alert("Введите номер комнаты!");
+    
+    document.getElementById('status-text').innerText = "Ищем соперника в комнате " + roomId + "...";
+    socket.emit('joinRoom', roomId);
+}
+
+// Сетевая синхронизация Socket.IO
+socket.on('initRole', (role) => {
+    myRole = role;
+    document.getElementById('status-text').innerText = `Вы вошли как ${role === 'p1' ? 'Коржик (Синий)' : 'Карамелька (Красный)'}. Ожидаем второго игрока...`;
+});
+
+socket.on('gameStart', (players) => {
+    document.getElementById('lobby').style.display = 'none';
+    isMultiplayerStarted = true;
+    resetPositions();
+});
+
+socket.on('updateOpponent', (data) => {
+    if (data.role === 'p1') { p1.x = data.x; p1.y = data.y; }
+    if (data.role === 'p2') { p2.x = data.x; p2.y = data.y; }
+});
+
+socket.on('updatePuck', (serverPuck) => {
+    // Чтобы не было дерганий, Игрок 2 просто плавно принимает координаты шайбы, которую считает Игрок 1
+    if (myRole === 'p2') {
+        puck.x = serverPuck.x;
+        puck.y = serverPuck.y;
+    }
+});
+
+socket.on('updateScore', (serverScores) => {
+    scores = serverScores;
+    document.getElementById('s1').innerText = scores[0];
+    document.getElementById('s2').innerText = scores[1];
+    resetPositions();
+});
+
+socket.on('playerLeft', () => {
+    alert("Соперник убежал! Миу-миу-миу.");
+    location.reload();
+});
+
+function resetPositions() {
+    p1.x = canvas.width / 2; p1.y = canvas.height * 0.82;
+    p2.x = canvas.width / 2; p2.y = canvas.height * 0.18;
+    puck.x = canvas.width / 2; puck.y = canvas.height / 2;
+    puck.speedX = (Math.random() - 0.5) * 3;
+    puck.speedY = (myRole === 'p1' ? -6 : 6);
+}
+
+// Считывание пальца на экране Redmi Note 10 Pro
+function handleTouch(e) {
+    if(!isMultiplayerStarted) return;
+    e.preventDefault();
+    
+    const rect = canvas.getBoundingClientRect();
+    const touch = e.touches[0];
+    const tX = (touch.clientX - rect.left) * (canvas.width / rect.width);
+    const tY = (touch.clientY - rect.top) * (canvas.height / rect.height);
+
+    // Строгое деление поля пополам — каждый рулит на своей стороне
+    if (myRole === 'p1' && tY > canvas.height / 2) {
+        p1.x = Math.max(p1.radius, Math.min(canvas.width - p1.radius, tX));
+        p1.y = Math.max(canvas.height / 2 + p1.radius, Math.min(canvas.height - p1.radius, tY));
+        socket.emit('moveMallet', { roomId, role: 'p1', x: p1.x, y: p1.y });
+    } else if (myRole === 'p2' && tY < canvas.height / 2) {
+        p2.x = Math.max(p2.radius, Math.min(canvas.width - p2.radius, tX));
+        p2.y = Math.max(p2.radius, Math.min(canvas.height / 2 - p2.radius, tY));
+        socket.emit('moveMallet', { roomId, role: 'p2', x: p2.x, y: p2.y });
+    }
+}
+canvas.addEventListener('touchstart', handleTouch, {passive: false});
+canvas.addEventListener('touchmove', handleTouch, {passive: false});
+
+// Передача чистого импульса при ударе (Сила зависит от скорости пальца)
+function collide(puck, mallet) {
+    let dx = puck.x - mallet.x;
+    let dy = puck.y - mallet.y;
+    let dist = Math.sqrt(dx * dx + dy * dy);
+    
+    if (dist < puck.radius + mallet.radius) {
+        let angle = Math.atan2(dy, dx);
+        
+        puck.x = mallet.x + Math.cos(angle) * (puck.radius + mallet.radius);
+        puck.y = mallet.y + Math.sin(angle) * (puck.radius + mallet.radius);
+
+        let mSpeedX = mallet.x - mallet.lastX;
+        let mSpeedY = mallet.y - mallet.lastY;
+        
+        // Точная физика удара
+        puck.speedX = -puck.speedX * 0.4 + mSpeedX * 1.1;
+        puck.speedY = -puck.speedY * 0.4 + mSpeedY * 1.1;
+    }
+}
+
+function update() {
+    if (!isMultiplayerStarted) return;
+
+    // Главные физические расчеты берет на себя Игрок 1 (Хост), чтобы избежать дерганий в сети
+    if (myRole === 'p1') {
+        puck.x += puck.speedX; 
+        puck.y += puck.speedY;
+        puck.speedX *= puck.friction; 
+        puck.speedY *= puck.friction;
+
+        collide(puck, p1); 
+        collide(puck, p2);
+
+        const gLeft = (canvas.width - goalWidth) / 2;
+        const gRight = (canvas.width + goalWidth) / 2;
+
+        // Отскоки от левого и правого борта
+        if (puck.x - puck.radius < 0) { puck.x = puck.radius; puck.speedX = -puck.speedX * puck.bounce; }
+        if (puck.x + puck.radius > canvas.width) { puck.x = canvas.width - puck.radius; puck.speedX = -puck.speedX * puck.bounce; }
+
+        // Верхний борт (Ворота Карамельки)
+        if (puck.y - puck.radius < 0) {
+            if (puck.x > gLeft && puck.x < gRight) { scores[0]++; socket.emit('goal', {roomId, scores}); }
+            else { puck.y = puck.radius; puck.speedY = -puck.speedY * puck.bounce; }
+        }
+        // Нижний борт (Ворота Коржика)
+        if (puck.y + puck.radius > canvas.height) {
+            if (puck.x > gLeft && puck.x < gRight) { scores[1]++; socket.emit('goal', {roomId, scores}); }
+            else { puck.y = canvas.height - puck.radius; puck.speedY = -puck.speedY * puck.bounce; }
+        }
+
+        // Шлем рассчитанные координаты шайбы Игроку 2
+        socket.emit('syncPuck', { roomId, puck: { x: puck.x, y: puck.y } });
+    }
+
+    // Сохраняем предыдущий кадр координат для расчета векторов сил
+    p1.lastX = p1.x; p1.lastY = p1.y;
+    p2.lastX = p2.x; p2.lastY = p2.y;
+}
+
+function draw() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    if (!isMultiplayerStarted) return;
+
+    // Отрисовка линий поля оригинального автомата
+    ctx.strokeStyle = 'rgba(243, 156, 18, 0.4)'; 
+    ctx.lineWidth = 6;
+    ctx.beginPath(); ctx.arc(canvas.width / 2, canvas.height / 2, canvas.width * 0.16, 0, Math.PI * 2); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(0, canvas.height / 2); ctx.lineTo(canvas.width, canvas.height / 2); ctx.stroke();
+
+    // Ворота
+    ctx.fillStyle = '#bdc3c7';
+    const gLeft = (canvas.width - goalWidth) / 2;
+    ctx.fillRect(gLeft, 0, goalWidth, 12); 
+    ctx.fillRect(gLeft, canvas.height - 12, goalWidth, 12);
+
+    // Функция отрисовки круглых ракеток
+    const drawCircle = (obj, color, strokeColor) => {
+        ctx.beginPath(); ctx.arc(obj.x, obj.y, obj.radius, 0, Math.PI * 2);
+        ctx.fillStyle = color; ctx.fill(); 
+        ctx.strokeStyle = strokeColor; ctx.lineWidth = 5; ctx.stroke();
+    };
+
+    drawCircle(p1, p1.color, p1.stroke); // Коржик
+    drawCircle(p2, p2.color, p2.stroke); // Карамелька
+    drawCircle(puck, '#1e272e', '#000'); // Шайба
+}
+
+function loop() { 
+    update(); 
+    draw(); 
+    requestAnimationFrame(loop); 
+}
+
+resize();
+loop();
+</script>
+</body>
+</html>
